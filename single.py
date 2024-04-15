@@ -5,7 +5,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets
 from torchvision.transforms import ToTensor
 import time
-
+import copy
 
 
 def test(dataloader, model, loss_fn):
@@ -44,35 +44,46 @@ def train(dataloader, model, loss_fn, optimizer):
     print(f"Time taken:{time.time()-t_start:>3f}")
 
 def SingleTrain (epochs):
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
         train(train_dataloader, model, loss_fn, optimizer)
         test(test_dataloader, model, loss_fn)
 
-def trainNetWork(dataloader, model, loss_fn, optimizer):
+def NetworkIteration(num_devices,dataloader, global_model, loss_fn,local_optimizer):
+
+    local_model = []
+
+    for r in range(num_devices):     
+        model_copy = copy.deepcopy(global_model)
+        model_copy.train()
+        local_model.append(model_copy)
+
     t_start = time.time()
     size = len(dataloader.dataset)
-    model.train()
+    print("Len of DataLoader={size}")
     for batch, (X, y) in enumerate(dataloader):
+        model_idx = batch % num_devices
         #print(batch)
         X, y = X.to(device), y.to(device)
 
         # Compute prediction error
-        pred = model(X)
+        pred = local_model[model_idx] (X)
         loss = loss_fn(pred, y)
-        optimizer.zero_grad()
+        local_optimizer[model_idx].zero_grad()
         loss.backward()
-        optimizer.step()
-        if batch % 100 == 0:
-            loss, current = loss.item(), batch * len(X)
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
-            
+        local_optimizer[model_idx].step()
+
+                
     print(f"Time taken:{time.time()-t_start:>3f}")
 
-def NetworkTrain (epochs, num_devices):
+def NetworkTrain (num_devices,epochs ):
+    local_optimizer = []
+    for r in range(num_devices):
+        local_optimizer.append(torch.optim.SGD(model.parameters(), lr=1e-3))
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
-        train(train_dataloader, model, loss_fn, optimizer)
+        NetworkIteration(num_devices,train_dataloader, model, loss_fn, local_optimizer)
         test(test_dataloader, model, loss_fn)
 
     # Get cpu or gpu device for training.
@@ -98,7 +109,7 @@ Resmodel.fc = nn.Linear(num_ftrs, num_classes)
 model = Resmodel.to(device)   # set current net
 
 loss_fn = nn.CrossEntropyLoss()
-optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+
 training_dataSVHN = datasets.SVHN(
     root="data",
     split ='train',
@@ -117,8 +128,8 @@ test_dataSVHN = datasets.SVHN(
 batch_size = 384
 
 # Create data loaders.
-train_dataloader = DataLoader(training_dataSVHN, batch_size=batch_size)
-test_dataloader = DataLoader(test_dataSVHN, batch_size=batch_size)
+train_dataloader = DataLoader(training_dataSVHN, batch_size=batch_size,shuffle=False)
+test_dataloader = DataLoader(test_dataSVHN, batch_size=batch_size,shuffle=False)
 
 for X, y in test_dataloader:
     print(f"Shape of X [N, C, H, W]: {X.shape}")
@@ -127,5 +138,6 @@ for X, y in test_dataloader:
 
 
 epochs = 10
-SingleTrain(epochs)
+#SingleTrain(epochs)
+NetworkTrain(6,epochs)
 print("Done!")
