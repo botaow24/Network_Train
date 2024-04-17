@@ -37,53 +37,115 @@ def train(dataloader, model, loss_fn, optimizer):
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
-        if batch % 100 == 0:
-            loss, current = loss.item(), batch * len(X)
-            print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
+        #if batch % 100 == 0:
+        #    loss, current = loss.item(), batch * len(X)
+        #    print(f"loss: {loss:>7f}  [{current:>5d}/{size:>5d}]")
             
     print(f"Time taken:{time.time()-t_start:>3f}")
 
 def SingleTrain (epochs):
     optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
     for t in range(epochs):
-        print(f"Epoch {t+1}\n-------------------------------")
+        print(f"Single Train Epoch {t+1}\n-------------------------------")
         train(train_dataloader, model, loss_fn, optimizer)
         test(test_dataloader, model, loss_fn)
 
-def NetworkIteration(num_devices,dataloader, global_model, loss_fn,local_optimizer):
 
-    local_model = []
+def NetworkIteration(num_devices,dataloader, global_model,global_optimizer, loss_fn,local_model,local_optimizer):
 
-    for r in range(num_devices):     
-        model_copy = copy.deepcopy(global_model)
-        model_copy.train()
-        local_model.append(model_copy)
-
+    for lm in local_model:
+        lm.load_state_dict(global_model.state_dict())
+        
     t_start = time.time()
     size = len(dataloader.dataset)
-    print("Len of DataLoader={size}")
+    print(f"Len of DataLoader={size}")
     for batch, (X, y) in enumerate(dataloader):
         model_idx = batch % num_devices
-        #print(batch)
         X, y = X.to(device), y.to(device)
-
+        
         # Compute prediction error
         pred = local_model[model_idx] (X)
         loss = loss_fn(pred, y)
         local_optimizer[model_idx].zero_grad()
         loss.backward()
         local_optimizer[model_idx].step()
+        
+        '''
+        pred = global_model(X)
+        loss = loss_fn(pred, y)
+        global_optimizer.zero_grad()
+        loss.backward()
+        global_optimizer.step()
+        '''
 
-                
-    print(f"Time taken:{time.time()-t_start:>3f}")
+    print(f"Train Time taken:{time.time()-t_start:>3f}")
+    MergeResultAllReduce(global_model,local_model)
+
+
+def MergeResultAllReduce(global_model,local_model): # No compression
+
+    '''
+    key_list  = []
+    key_to_idx = {}
+    for name, param in global_model.named_parameters():
+        #if param.requires_grad:
+        key_to_idx[name] =len(key_list)
+        key_list.append(name)
+
+    print(key_list)
+    key_s = []
+    for name in global_model.state_dict():
+        #key_s.append(name)
+        if name not in key_to_idx:
+            key_s.append(name)
+
+    print(key_s)
+    '''
+    key_list  = []
+    key_to_idx = {}
+    for name in global_model.state_dict():
+        key_to_idx[name] =len(key_list)
+        key_list.append(name)
+    #print(key_list)
+    #print(key_to_idx)
+    global_dict = global_model.state_dict()
+    diff_lst = []
+    for lm in local_model:
+        local_diff = {}
+        local_dict = lm.state_dict()
+        for key in key_list:
+            local_diff[key] = local_dict[key] - global_dict[key]
+            
+        diff_lst.append(local_diff)
+    
+    for key in key_list:
+        reduce_sum = diff_lst[0][key]
+        for idx in range(1, len(diff_lst)):
+            reduce_sum = reduce_sum + diff_lst[idx][key]
+        reduce_sum = reduce_sum/len(diff_lst) 
+        global_dict[key] = global_dict[key]+reduce_sum
+        
+    global_model.load_state_dict(global_dict)
+
+
 
 def NetworkTrain (num_devices,epochs ):
+    print(f"Netwrok Train num_devices={num_devices}, epochs={epochs}")
+
+    model.train()
+    local_model = []
     local_optimizer = []
-    for r in range(num_devices):
-        local_optimizer.append(torch.optim.SGD(model.parameters(), lr=1e-3))
+    optimizer = torch.optim.SGD(model.parameters(), lr=1e-3)
+    for r in range(num_devices):     
+        model_copy = copy.deepcopy(model)
+        model_copy.train()
+        local_model.append(model_copy)
+    for r in range(num_devices):   
+        local_optimizer.append(torch.optim.SGD(local_model[r].parameters(), lr=1e-3))
+
     for t in range(epochs):
         print(f"Epoch {t+1}\n-------------------------------")
-        NetworkIteration(num_devices,train_dataloader, model, loss_fn, local_optimizer)
+        NetworkIteration(num_devices,train_dataloader, model,optimizer, loss_fn,local_model,local_optimizer)
         test(test_dataloader, model, loss_fn)
 
     # Get cpu or gpu device for training.
@@ -139,5 +201,5 @@ for X, y in test_dataloader:
 
 epochs = 10
 #SingleTrain(epochs)
-NetworkTrain(6,epochs)
+NetworkTrain(4,epochs)
 print("Done!")
