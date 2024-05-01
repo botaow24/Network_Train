@@ -71,13 +71,13 @@ def NetworkIteration(num_devices,dataloader, global_model,global_optimizer, loss
         local_optimizer[model_idx].step()
 
     print(f"Train Time taken:{time.time()-t_start:>3f}")
-    MergeResultDK(global_model,local_model)
+    #MergeResultDK(global_model,local_model)
     #MergeResultHighK(global_model,local_model)
-    #MergeResultAllReduce(global_model,local_model)
+    MergeResultAllReduce(global_model,local_model)
 
 
 def MergeResultAllReduce(global_model,local_model): # No compression
-
+    print("AllReduce")
     key_list  = []
     key_to_idx = {}
     for name in global_model.state_dict():
@@ -103,6 +103,87 @@ def MergeResultAllReduce(global_model,local_model): # No compression
         reduce_sum = reduce_sum/len(diff_lst) 
         global_dict[key] = global_dict[key]+reduce_sum
         
+    global_model.load_state_dict(global_dict)
+
+def KK(global_model,local_model): # No compression
+    print("KK")
+    key_list  = []
+    key_to_idx = {}
+    for name in global_model.state_dict():
+        key_to_idx[name] =len(key_list)
+        key_list.append(name)
+        key_trainable = []
+    key_trainable_idx = {}
+    count_trainable = 0
+    for name, param in global_model.named_parameters():
+        if param.requires_grad:
+            ele = 1
+            sz = global_model.state_dict()[name].size()
+            for s in sz:
+                ele = ele * s
+            count_trainable += ele
+            key_trainable_idx[name] = len(key_trainable)
+            key_trainable.append(name)
+
+    key_total = []
+    key_other = []
+    for name in global_model.state_dict():
+        key_total.append(name)
+        if name not in key_trainable_idx:
+            key_other.append(name)
+    #print(key_list)
+    #print(key_to_idx)
+    global_dict_temp = global_model.state_dict()
+    global_dict =  global_model.state_dict()
+    diff_lst = []
+    for lm in local_model:
+        local_diff = {}
+        local_dict = lm.state_dict()
+        for key in key_list:
+            local_diff[key] = local_dict[key] - global_dict[key]
+        diff_lst.append(local_diff)
+    
+    rs = global_model.state_dict()
+    for key in key_list:
+        reduce_sum = diff_lst[0][key]
+        for idx in range(1, len(diff_lst)):
+            reduce_sum = reduce_sum + diff_lst[idx][key]
+        rs[key] = reduce_sum/len(diff_lst)     
+
+    K = int(count_trainable *0.01)
+    print("K=",K)
+    sort_lst = []
+    for key in key_trainable:
+        kid = key_trainable_idx[key]
+        reduce_sum = rs[key]
+        X = torch.reshape(reduce_sum , (-1,))
+        for i, x in enumerate(X.cpu().numpy()):
+            sort_lst.append( (abs(x),x,kid,i) )
+    sorted_lst = sorted(sort_lst, key=lambda ls: ls[0],reverse=True) # sort by the abs
+    sorted_lst = sorted_lst[:K]
+    delta_lst = []
+    delta_count = []
+    for k in key_trainable:
+        #print('one ',k)
+        z = torch.zeros_like(global_dict[k] , device = "cpu")
+        delta_lst.append(torch.reshape(z, (-1,)))
+    for item in sorted_lst:
+            value = item[1]
+            kid = item[2]
+            loc = item[3]
+            delta_lst[kid][loc] += value
+    for idx in range(len(key_trainable)):
+        k = key_trainable[idx]
+        #print('two ',k)
+        delta = delta_lst[idx]
+        delta = torch.reshape(delta, global_dict[k].size()).to(device)
+        global_dict[k] = global_dict_temp[k]+delta
+
+         # Merge Other
+    for key in key_other:
+        reduce_sum = rs[key]
+        global_dict[key] = global_dict_temp[key]+reduce_sum
+
     global_model.load_state_dict(global_dict)
 
 def MergeHighK(keys,global_dict,HighK_lst):
